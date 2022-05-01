@@ -12,11 +12,11 @@ use argon2::{
     Argon2,
 };
 
-use rocket::http::Status;
 use rocket::http::{Cookie, CookieJar};
 use rocket::request::{self, FromRequest, Outcome, Request};
 use rocket::response::Debug;
 use rocket::serde::{json::Json, Deserialize, Serialize};
+use rocket::{http::Status};
 use rocket_sync_db_pools::diesel;
 
 use self::diesel::sqlite::SqliteConnection;
@@ -33,12 +33,107 @@ pub struct DbConn(SqliteConnection);
 type Result<T, E = Debug<diesel::result::Error>> = std::result::Result<T, E>;
 
 // Workspace
+#[derive(Serialize, Debug)]
+#[serde(crate = "rocket::serde")]
+struct WorkspaceInfo {
+    id: i32,
+    name: String,
+    shared: i32,
+    members: Vec<WorkspaceMemberInfo>,
+    projects: Vec<ProjectInfo>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(crate = "rocket::serde")]
+struct WorkspaceMemberInfo {
+    name: String,
+    role: i32,
+}
+#[derive(Serialize, Debug)]
+#[serde(crate = "rocket::serde")]
+struct ProjectInfo {
+    id: i32,
+    workspace: i32,
+    name: String,
+    source: String,
+    video: Option<i32>,
+    thumbnail: String,
+    duration: i32,
+}
 
 #[get("/workspace/list")]
-async fn list_workspaces(db: DbConn) -> Result<Json<Vec<Workspace>>> {
-    let ids: Vec<Workspace> = db.run(move |conn| workspace::table.load(conn)).await?;
+async fn list_workspaces(db: DbConn, user: User) -> Result<Json<Vec<WorkspaceInfo>>> {
+    let accessible_workspaces: Vec<i32> = db
+        .run(move |conn| {
+            workspace_member::table
+                .filter(workspace_member::user.eq(user.id))
+                .select(workspace_member::workspace)
+                .load::<i32>(conn)
+        })
+        .await?;
 
-    Ok(Json(ids))
+    let workspaces: Vec<Workspace> = db
+        .run(move |conn| {
+            workspace::table
+                .filter(workspace::id.eq_any(accessible_workspaces))
+                .load(conn)
+        })
+        .await?;
+
+    let mut workspace_infos: Vec<WorkspaceInfo> = Vec::new();
+    for workspace in workspaces {
+        let workspace_clone = workspace.clone();
+        let members: Vec<WorkspaceMember> = db
+            .run(move |conn| {
+                WorkspaceMember::belonging_to(&workspace_clone).load::<WorkspaceMember>(conn)
+            })
+            .await?;
+        let mut member_infos: Vec<WorkspaceMemberInfo> = Vec::new();
+        for member in members {
+            let user = db
+                .run(move |conn| {
+                    user::table
+                        .filter(user::id.eq(member.user))
+                        .first::<User>(conn)
+                })
+                .await?;
+            member_infos.push(WorkspaceMemberInfo {
+                name: user.username,
+                role: member.role,
+            });
+        }
+        let workspace_clone2 = workspace.clone(); // is there a better way to do this?
+        let projects: Vec<(Project, Video)> = db
+            .run(move |conn| {
+                Project::belonging_to(&workspace_clone2)
+                    .inner_join(schema::video::table)
+                    .load::<(Project, Video)>(conn)
+            })
+            .await?;
+
+        let project_infos: Vec<ProjectInfo> = projects
+            .iter()
+            .map(|(project, video)| ProjectInfo {
+                id: project.id,
+                workspace: project.workspace,
+                name: project.name.clone(),
+                source: video.source.clone(),
+                video: project.video,
+                thumbnail: format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", video.identifier),
+                duration: video.duration.unwrap_or(0),
+            })
+            .collect();
+
+        workspace_infos.push(WorkspaceInfo {
+            id: workspace.id,
+            name: workspace.name,
+            shared: workspace.shared,
+            members: member_infos,
+            projects: project_infos,
+        });
+    }
+
+    Ok(Json(workspace_infos))
 }
 
 // Authentication
@@ -88,7 +183,11 @@ struct LoginInfo {
 }
 
 #[post("/login", data = "<info>")]
-async fn login(cookies: &CookieJar<'_>, info: Json<LoginInfo>, db: DbConn) -> Result<Json<User>> {
+async fn login(
+    cookies: &CookieJar<'_>,
+    info: Json<LoginInfo>,
+    db: DbConn,
+) -> Result<Json<GenericResponse>, (Status, &'static str)> {
     let supplied_info = info.into_inner();
     let user: User = db
         .run(move |conn| {
@@ -96,16 +195,20 @@ async fn login(cookies: &CookieJar<'_>, info: Json<LoginInfo>, db: DbConn) -> Re
                 .filter(user::username.eq(supplied_info.user))
                 .first(conn)
         })
-        .await?;
+        .await
+        .map_err(|_| (Status::Unauthorized, "Username incorrect"))?;
 
-    let parsed_hash = PasswordHash::new(&user.password).expect("could not parse hash");
-    match Argon2::default().verify_password(supplied_info.password.as_bytes(), &parsed_hash) {
-        Ok(_) => {
-            cookies.add_private(Cookie::new("auth", user.id.to_string()));
-            Ok(Json(user))
-        }
-        Err(_) => Err(Debug(diesel::result::Error::NotFound)),
-    }
+    let parsed_hash = PasswordHash::new(&user.password)
+        .map_err(|_| (Status::InternalServerError, "An internal error occured"))?;
+    Argon2::default()
+        .verify_password(supplied_info.password.as_bytes(), &parsed_hash)
+        .map_err(|_| (Status::Unauthorized, "Password incorrect"))?;
+
+    cookies.add_private(Cookie::new("auth", user.id.to_string()));
+    Ok(Json(GenericResponse {
+        error: false,
+        message: Some("Logged in"),
+    }))
 }
 
 // TODO use the returning thing https://github.com/diesel-rs/diesel/discussions/2684
@@ -116,21 +219,51 @@ no_arg_sql_function!(
     "Represents the SQL last_insert_row() function"
 );
 
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct GenericResponse {
+    error: bool,
+    message: Option<&'static str>,
+}
+
 #[post("/register", data = "<info>")]
 async fn register(
     cookies: &CookieJar<'_>,
     info: Json<LoginInfo>,
     db: DbConn,
-) -> Result<String, String> {
+) -> Result<Json<GenericResponse>, (Status, &'static str)> {
     let supplied_info = info.into_inner();
+    // clone variable to move it into the closure, maybe this can be done in a nicer way?
+    let cloned_name = supplied_info.user.clone();
+
+    let existing_user = db
+        .run(move |conn| {
+            user::table
+                .filter(user::username.eq(cloned_name.as_str()))
+                .count()
+                .get_result::<i64>(conn)
+        })
+        .await
+        .map_err(|_| (Status::InternalServerError, "An internal error occured"))?;
+
+
+    if existing_user > 0 {
+        return Err((Status::BadRequest, "Username not available"))
+
+    }
+
+    if supplied_info.password.len() < 8 {
+        return Err((Status::BadRequest, "Password must be at least 8 characters"))
+    }
 
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
     let password_hash = match argon2.hash_password(supplied_info.password.as_bytes(), &salt) {
         Ok(hash) => hash,
-        Err(_) => return Err("Could not generate hash".to_string()),
+        Err(_) => {
+            return Err((Status::InternalServerError, "An internal error occured"))
+        }
     };
-
     let new_user = NewUser {
         username: supplied_info.user,
         password: password_hash.to_string(),
@@ -152,18 +285,29 @@ async fn register(
     match user_id {
         Ok(id) => {
             cookies.add_private(Cookie::new("auth", id.to_string()));
-            Ok("Success".to_string())
+            Ok(Json(GenericResponse {
+                error: false,
+                message: None,
+            }))
         }
-        Err(_) => Err("Could not create user".to_string()),
+        Err(_) => Err((Status::InternalServerError, "An internal error occured")),
     }
+}
+
+/// Publicly visible stuff
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct UserInfo {
+    name: String,
 }
 
 /// Get user ID
 #[get("/auth")]
-fn auth(cookies: &CookieJar<'_>) -> Option<String> {
-    cookies
-        .get_private("auth")
-        .map(|crumb| format!("User ID: {}", crumb.value()))
+fn auth(user: User) -> Json<UserInfo> {
+    let info = UserInfo {
+        name: user.username,
+    };
+    Json(info)
 }
 
 /// Test thing

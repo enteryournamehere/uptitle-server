@@ -18,8 +18,9 @@ pub struct NewUser {
     pub password: String,
 }
 
-#[derive(Queryable, Serialize)]
+#[derive(Debug, Clone, Serialize, Queryable, Identifiable)]
 #[serde(crate = "rocket::serde")]
+#[table_name = "workspace"]
 pub struct Workspace {
     pub id: i32,
     pub name: String,
@@ -27,7 +28,18 @@ pub struct Workspace {
     pub shared: i32,
 }
 
-#[derive(Queryable, Serialize)]
+#[derive(Debug, Clone, Serialize, Queryable, Identifiable, Associations)]
+#[serde(crate = "rocket::serde")]
+#[belongs_to(Workspace, foreign_key="workspace")]
+#[table_name = "workspace_member"]
+#[primary_key(workspace, user)]
+pub struct WorkspaceMember {
+    pub workspace: i32,
+    pub user: i32,
+    pub role: i32,
+}
+
+#[derive(Debug, Queryable, Serialize)]
 #[serde(crate = "rocket::serde")]
 pub struct Video {
     pub id: i32,
@@ -37,8 +49,11 @@ pub struct Video {
     pub waveform: Option<Vec<u8>>,
 }
 
-#[derive(Queryable, Serialize)]
+#[derive(Debug, Clone, Queryable, Serialize, Identifiable, Associations)]
 #[serde(crate = "rocket::serde")]
+#[belongs_to(Workspace, foreign_key="workspace")]
+#[table_name="project"]
+#[primary_key(id)]
 pub struct Project {
     pub id: i32,
     pub workspace: i32,
