@@ -128,6 +128,32 @@ async fn list_workspaces(db: DbConn, user: User) -> Result<Json<Vec<WorkspaceInf
     Ok(Json(workspace_infos))
 }
 
+#[get("/project/<id>")]
+async fn get_project(id: i32, user: User, db: DbConn) -> Result<Json<ProjectInfo>, Status> {
+    let (project, video): (Project, Video) = db
+        .run(move |conn| {
+            project::table
+                .inner_join(workspace::table.left_join(workspace_member::table))
+                .filter(workspace_member::user.eq(user.id))
+                .filter(project::id.eq(id))
+                .inner_join(schema::video::table)
+                .select((project::all_columns, video::all_columns))
+                .first::<(Project, Video)>(conn)
+        })
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    Ok(Json(ProjectInfo {
+        id: project.id,
+        workspace: project.workspace,
+        name: project.name.clone(),
+        source: video.source.clone(),
+        video: project.video,
+        thumbnail: format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", video.identifier),
+        duration: video.duration.unwrap_or(0),
+    }))
+}
+
 // Authentication
 
 // Ensure user is logged in and get their info from the DB
@@ -318,4 +344,5 @@ fn rocket() -> _ {
         .mount("/api", routes![secure]) // Temp
         .mount("/api", routes![login, auth, logout, register]) // Auth
         .mount("/api", routes![list_workspaces]) // Workspaces
+        .mount("/api", routes![get_project]) // Projects
 }
