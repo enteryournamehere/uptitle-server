@@ -1,8 +1,9 @@
 use crate::schema::*;
 use rocket::serde::Serialize;
 
-#[derive(Queryable, Serialize)]
+#[derive(Debug, Clone, Serialize, Queryable, Identifiable, Associations)]
 #[serde(crate = "rocket::serde")]
+#[table_name = "user"]
 pub struct User {
     pub id: i32,
     pub username: String,
@@ -30,7 +31,8 @@ pub struct Workspace {
 
 #[derive(Debug, Clone, Serialize, Queryable, Identifiable, Associations)]
 #[serde(crate = "rocket::serde")]
-#[belongs_to(Workspace, foreign_key="workspace")]
+#[belongs_to(Workspace, foreign_key = "workspace")]
+#[belongs_to(User, foreign_key = "user")]
 #[table_name = "workspace_member"]
 #[primary_key(workspace, user)]
 pub struct WorkspaceMember {
@@ -51,8 +53,8 @@ pub struct Video {
 
 #[derive(Debug, Clone, Queryable, Serialize, Identifiable, Associations)]
 #[serde(crate = "rocket::serde")]
-#[belongs_to(Workspace, foreign_key="workspace")]
-#[table_name="project"]
+#[belongs_to(Workspace, foreign_key = "workspace")]
+#[table_name = "project"]
 #[primary_key(id)]
 pub struct Project {
     pub id: i32,

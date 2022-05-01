@@ -12,11 +12,11 @@ use argon2::{
     Argon2,
 };
 
+use rocket::http::Status;
 use rocket::http::{Cookie, CookieJar};
 use rocket::request::{self, FromRequest, Outcome, Request};
 use rocket::response::Debug;
 use rocket::serde::{json::Json, Deserialize, Serialize};
-use rocket::{http::Status};
 use rocket_sync_db_pools::diesel;
 
 use self::diesel::sqlite::SqliteConnection;
@@ -63,45 +63,37 @@ struct ProjectInfo {
 
 #[get("/workspace/list")]
 async fn list_workspaces(db: DbConn, user: User) -> Result<Json<Vec<WorkspaceInfo>>> {
-    let accessible_workspaces: Vec<i32> = db
-        .run(move |conn| {
-            workspace_member::table
-                .filter(workspace_member::user.eq(user.id))
-                .select(workspace_member::workspace)
-                .load::<i32>(conn)
-        })
-        .await?;
-
     let workspaces: Vec<Workspace> = db
         .run(move |conn| {
             workspace::table
-                .filter(workspace::id.eq_any(accessible_workspaces))
-                .load(conn)
+                .inner_join(workspace_member::table)
+                .filter(workspace_member::user.eq(user.id))
+                .select(workspace::all_columns)
+                .load::<Workspace>(conn)
         })
         .await?;
 
     let mut workspace_infos: Vec<WorkspaceInfo> = Vec::new();
     for workspace in workspaces {
         let workspace_clone = workspace.clone();
-        let members: Vec<WorkspaceMember> = db
+        let members: Vec<(WorkspaceMember, User)> = db
             .run(move |conn| {
-                WorkspaceMember::belonging_to(&workspace_clone).load::<WorkspaceMember>(conn)
+                WorkspaceMember::belonging_to(&workspace_clone)
+                    .inner_join(user::table)
+                    .load::<(WorkspaceMember, User)>(conn)
             })
             .await?;
-        let mut member_infos: Vec<WorkspaceMemberInfo> = Vec::new();
-        for member in members {
-            let user = db
-                .run(move |conn| {
-                    user::table
-                        .filter(user::id.eq(member.user))
-                        .first::<User>(conn)
-                })
-                .await?;
-            member_infos.push(WorkspaceMemberInfo {
-                name: user.username,
+        let member_infos: Vec<WorkspaceMemberInfo> = members
+            .iter()
+            .map(|(member, user)| WorkspaceMemberInfo {
+                name: user
+                    .display_name
+                    .as_ref()
+                    .unwrap_or(&user.username)
+                    .to_string(),
                 role: member.role,
-            });
-        }
+            })
+            .collect();
         let workspace_clone2 = workspace.clone(); // is there a better way to do this?
         let projects: Vec<(Project, Video)> = db
             .run(move |conn| {
@@ -246,23 +238,19 @@ async fn register(
         .await
         .map_err(|_| (Status::InternalServerError, "An internal error occured"))?;
 
-
     if existing_user > 0 {
-        return Err((Status::BadRequest, "Username not available"))
-
+        return Err((Status::BadRequest, "Username not available"));
     }
 
     if supplied_info.password.len() < 8 {
-        return Err((Status::BadRequest, "Password must be at least 8 characters"))
+        return Err((Status::BadRequest, "Password must be at least 8 characters"));
     }
 
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
     let password_hash = match argon2.hash_password(supplied_info.password.as_bytes(), &salt) {
         Ok(hash) => hash,
-        Err(_) => {
-            return Err((Status::InternalServerError, "An internal error occured"))
-        }
+        Err(_) => return Err((Status::InternalServerError, "An internal error occured")),
     };
     let new_user = NewUser {
         username: supplied_info.user,
