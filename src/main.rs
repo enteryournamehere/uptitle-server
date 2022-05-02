@@ -189,6 +189,58 @@ async fn get_subtitle_list(id: i32, user: User, db: DbConn) -> Result<Json<Vec<S
     Ok(Json(subtitles))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct SubtitleCreationInfo {
+    start: i32,
+    end: i32,
+    text: String,
+}
+
+#[post("/project/<id>/subtitle/create", data = "<info>")]
+async fn create_subtitle(
+    id: i32,
+    user: User,
+    info: Json<SubtitleCreationInfo>,
+    db: DbConn,
+) -> Result<String, Status> {
+    let project: Project = db
+        .run(move |conn| {
+            project::table
+                .inner_join(workspace::table.left_join(workspace_member::table))
+                .filter(workspace_member::user.eq(user.id))
+                .filter(project::id.eq(id))
+                .select(project::all_columns)
+                .first::<Project>(conn)
+        })
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    let subtitle = NewSubtitle {
+        project: project.id,
+        start: info.start,
+        end: info.end,
+        text: info.text.clone(),
+    };
+
+    let new_id: i32 = db
+        .run(move |conn| {
+            let result = diesel::insert_into(schema::subtitle::table)
+                .values(&subtitle)
+                .execute(conn);
+
+            if let Err(message) = result {
+                return Err(message);
+            }
+
+            diesel::select(last_insert_rowid).get_result::<i32>(conn)
+        })
+        .await
+        .map_err(|_| Status::InternalServerError)?;
+
+    Ok(new_id.to_string())
+}
+
 // Authentication
 
 // Ensure user is logged in and get their info from the DB
@@ -380,5 +432,5 @@ fn rocket() -> _ {
         .mount("/api", routes![login, auth, logout, register]) // Auth
         .mount("/api", routes![list_workspaces]) // Workspaces
         .mount("/api", routes![get_project]) // Projects
-        .mount("/api", routes![get_subtitle_list]) // Subtitles
+        .mount("/api", routes![get_subtitle_list, create_subtitle]) // Subtitles
 }

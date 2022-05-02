@@ -75,3 +75,12 @@ pub struct Subtitle {
     pub end: i32,
     pub text: String,
 }
+
+#[derive(Debug, Clone, Insertable)]
+#[table_name = "subtitle"]
+pub struct NewSubtitle {
+    pub project: i32,
+    pub start: i32,
+    pub end: i32,
+    pub text: String,
+}
