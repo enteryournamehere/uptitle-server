@@ -154,6 +154,28 @@ async fn get_project(id: i32, user: User, db: DbConn) -> Result<Json<ProjectInfo
     }))
 }
 
+#[get("/project/<id>/subtitle/list")]
+async fn get_subtitle_list(id: i32, user: User, db: DbConn) -> Result<Json<Vec<Subtitle>>, Status> {
+    let project: Project = db
+        .run(move |conn| {
+            project::table
+                .inner_join(workspace::table.left_join(workspace_member::table))
+                .filter(workspace_member::user.eq(user.id))
+                .filter(project::id.eq(id))
+                .select(project::all_columns)
+                .first::<Project>(conn)
+        })
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    let subtitles: Vec<Subtitle> = db
+        .run(move |conn| Subtitle::belonging_to(&project).load::<Subtitle>(conn))
+        .await
+        .map_err(|_| Status::InternalServerError)?;
+
+    Ok(Json(subtitles))
+}
+
 // Authentication
 
 // Ensure user is logged in and get their info from the DB
@@ -345,4 +367,5 @@ fn rocket() -> _ {
         .mount("/api", routes![login, auth, logout, register]) // Auth
         .mount("/api", routes![list_workspaces]) // Workspaces
         .mount("/api", routes![get_project]) // Projects
+        .mount("/api", routes![get_subtitle_list]) // Subtitles
 }

@@ -63,8 +63,11 @@ pub struct Project {
     pub video: Option<i32>,
 }
 
-#[derive(Queryable, Serialize)]
+#[derive(Debug, Clone, Queryable, Serialize, Identifiable, Associations)]
 #[serde(crate = "rocket::serde")]
+#[belongs_to(Project, foreign_key = "project")]
+#[table_name = "subtitle"]
+#[primary_key(id)]
 pub struct Subtitle {
     pub id: i32,
     pub project: i32,
