@@ -241,6 +241,42 @@ async fn create_subtitle(
     Ok(new_id.to_string())
 }
 
+#[delete("/project/<project_id>/subtitle/<subtitle_id>")]
+async fn delete_subtitle(
+    project_id: i32,
+    subtitle_id: i32,
+    user: User,
+    db: DbConn,
+) -> Result<(), Status> {
+    let project: Project = db
+        .run(move |conn| {
+            project::table
+                .inner_join(workspace::table.left_join(workspace_member::table))
+                .filter(workspace_member::user.eq(user.id))
+                .filter(project::id.eq(project_id))
+                .select(project::all_columns)
+                .first::<Project>(conn)
+        })
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    let deleted_count: usize = db
+        .run(move |conn| {
+            diesel::delete(subtitle::table)
+                .filter(subtitle::id.eq(subtitle_id))
+                .filter(subtitle::project.eq(project.id))
+                .execute(conn)
+        })
+        .await
+        .map_err(|_| Status::InternalServerError)?;
+
+    if deleted_count == 0 {
+        return Err(Status::NotFound);
+    }
+
+    Ok(())
+}
+
 // Authentication
 
 // Ensure user is logged in and get their info from the DB
@@ -432,5 +468,8 @@ fn rocket() -> _ {
         .mount("/api", routes![login, auth, logout, register]) // Auth
         .mount("/api", routes![list_workspaces]) // Workspaces
         .mount("/api", routes![get_project]) // Projects
-        .mount("/api", routes![get_subtitle_list, create_subtitle]) // Subtitles
+        .mount(
+            "/api",
+            routes![get_subtitle_list, create_subtitle, delete_subtitle],
+        ) // Subtitles
 }
