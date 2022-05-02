@@ -56,8 +56,15 @@ struct ProjectInfo {
     workspace: i32,
     name: String,
     source: String,
-    video: Option<i32>,
+    video: Option<VideoInfo>,
     thumbnail: String,
+    duration: i32,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(crate = "rocket::serde")]
+struct VideoInfo {
+    id: String,
     duration: i32,
 }
 
@@ -110,7 +117,10 @@ async fn list_workspaces(db: DbConn, user: User) -> Result<Json<Vec<WorkspaceInf
                 workspace: project.workspace,
                 name: project.name.clone(),
                 source: video.source.clone(),
-                video: project.video,
+                video: Some(VideoInfo {
+                    id: video.identifier.clone(),
+                    duration: video.duration.unwrap_or(0),
+                }),
                 thumbnail: format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", video.identifier),
                 duration: video.duration.unwrap_or(0),
             })
@@ -148,7 +158,10 @@ async fn get_project(id: i32, user: User, db: DbConn) -> Result<Json<ProjectInfo
         workspace: project.workspace,
         name: project.name.clone(),
         source: video.source.clone(),
-        video: project.video,
+        video: Some(VideoInfo {
+            id: video.identifier.clone(),
+            duration: video.duration.unwrap_or(0),
+        }),
         thumbnail: format!("https://i.ytimg.com/vi/{}/mqdefault.jpg", video.identifier),
         duration: video.duration.unwrap_or(0),
     }))

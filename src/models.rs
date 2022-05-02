@@ -73,5 +73,5 @@ pub struct Subtitle {
     pub project: i32,
     pub start: i32,
     pub end: i32,
-    pub text: i32,
+    pub text: String,
 }

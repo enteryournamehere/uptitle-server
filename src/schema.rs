@@ -15,7 +15,7 @@ diesel::table! {
         project -> Integer,
         start -> Integer,
         end -> Integer,
-        text -> Integer,
+        text -> Text,
     }
 }
 
