@@ -12,11 +12,14 @@ use argon2::{
     Argon2,
 };
 
-use rocket::http::Status;
 use rocket::http::{Cookie, CookieJar};
 use rocket::request::{self, FromRequest, Outcome, Request};
+use rocket::response::stream::{Event, EventStream};
 use rocket::response::Debug;
 use rocket::serde::{json::Json, Deserialize, Serialize};
+use rocket::tokio::select;
+use rocket::tokio::sync::broadcast::{channel, error::RecvError, Sender};
+use rocket::{http::Status, Shutdown, State};
 use rocket_sync_db_pools::diesel;
 
 use self::diesel::sqlite::SqliteConnection;
@@ -167,6 +170,78 @@ async fn get_project(id: i32, user: User, db: DbConn) -> Result<Json<ProjectInfo
     }))
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct CreateEventData {
+    pub subtitle: i32,
+    pub text: String,
+    pub start: i32,
+    pub end: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(crate = "rocket::serde")]
+struct EditEventData {
+    pub subtitle: i32,
+    pub text: Option<String>,
+    pub start: Option<i32>,
+    pub end: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(crate = "rocket::serde")]
+struct DeleteEventData {
+    pub subtitle: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(crate = "rocket::serde")]
+enum SubtitleEventType {
+    WaveformReady,
+    SubtitleCreate(CreateEventData),
+    SubtitleEdit(EditEventData),
+    SubtitleDelete(DeleteEventData),
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(crate = "rocket::serde")]
+struct SubtitleEvent {
+    info: SubtitleEventType,
+    project: i32,
+}
+
+#[get("/project/<project_id>/events")]
+async fn events(
+    project_id: i32,
+    queue: &State<Sender<SubtitleEvent>>,
+    mut end: Shutdown,
+) -> EventStream![] {
+    let mut rx = queue.subscribe();
+    EventStream! {
+        loop {
+            let msg = select! {
+                msg = rx.recv() => match msg {
+                    Ok(msg) => msg,
+                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Lagged(_)) => continue,
+                },
+                _ = &mut end => break,
+            };
+
+            if msg.project != project_id {
+                continue;
+            }
+
+            yield Event::json(&msg).event(match msg.info {
+                SubtitleEventType::WaveformReady => "waveform_ready",
+                SubtitleEventType::SubtitleEdit(_) => "subtitle_edit",
+                SubtitleEventType::SubtitleCreate(_) => "subtitle_create",
+                SubtitleEventType::SubtitleDelete(_) => "subtitle_delete",
+            });
+        }
+    }
+}
+
 #[get("/project/<id>/subtitle/list")]
 async fn get_subtitle_list(id: i32, user: User, db: DbConn) -> Result<Json<Vec<Subtitle>>, Status> {
     let project: Project = db
@@ -203,6 +278,7 @@ async fn create_subtitle(
     user: User,
     info: Json<SubtitleCreationInfo>,
     db: DbConn,
+    queue: &State<Sender<SubtitleEvent>>,
 ) -> Result<String, Status> {
     let project: Project = db
         .run(move |conn| {
@@ -222,11 +298,12 @@ async fn create_subtitle(
         end: info.end,
         text: info.text.clone(),
     };
+    let subtitle_clone = subtitle.clone();
 
     let new_id: i32 = db
         .run(move |conn| {
             let result = diesel::insert_into(schema::subtitle::table)
-                .values(&subtitle)
+                .values(&subtitle_clone)
                 .execute(conn);
 
             if let Err(message) = result {
@@ -238,6 +315,17 @@ async fn create_subtitle(
         .await
         .map_err(|_| Status::InternalServerError)?;
 
+    // Broadcast SSE
+    let _ = queue.send(SubtitleEvent {
+        info: SubtitleEventType::SubtitleCreate(CreateEventData {
+            subtitle: new_id,
+            start: subtitle.start,
+            end: subtitle.end,
+            text: subtitle.text,
+        }),
+        project: 1,
+    });
+
     Ok(new_id.to_string())
 }
 
@@ -247,6 +335,7 @@ async fn delete_subtitle(
     subtitle_id: i32,
     user: User,
     db: DbConn,
+    queue: &State<Sender<SubtitleEvent>>,
 ) -> Result<(), Status> {
     let project: Project = db
         .run(move |conn| {
@@ -273,6 +362,14 @@ async fn delete_subtitle(
     if deleted_count == 0 {
         return Err(Status::NotFound);
     }
+
+    // Broadcast SSE
+    let _ = queue.send(SubtitleEvent {
+        info: SubtitleEventType::SubtitleDelete(DeleteEventData {
+            subtitle: subtitle_id,
+        }),
+        project: project.id,
+    });
 
     Ok(())
 }
@@ -464,10 +561,11 @@ fn logout(cookies: &CookieJar<'_>) -> String {
 fn rocket() -> _ {
     rocket::build()
         .attach(DbConn::fairing())
+        .manage(channel::<SubtitleEvent>(1024).0)
         .mount("/api", routes![secure]) // Temp
         .mount("/api", routes![login, auth, logout, register]) // Auth
         .mount("/api", routes![list_workspaces]) // Workspaces
-        .mount("/api", routes![get_project]) // Projects
+        .mount("/api", routes![get_project, events]) // Projects
         .mount(
             "/api",
             routes![get_subtitle_list, create_subtitle, delete_subtitle],
