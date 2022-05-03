@@ -257,7 +257,11 @@ async fn get_subtitle_list(id: i32, user: User, db: DbConn) -> Result<Json<Vec<S
         .map_err(|_| Status::NotFound)?;
 
     let subtitles: Vec<Subtitle> = db
-        .run(move |conn| Subtitle::belonging_to(&project).load::<Subtitle>(conn))
+        .run(move |conn| {
+            Subtitle::belonging_to(&project)
+                .order(subtitle::start.asc())
+                .load::<Subtitle>(conn)
+        })
         .await
         .map_err(|_| Status::InternalServerError)?;
 
@@ -367,6 +371,89 @@ async fn delete_subtitle(
     let _ = queue.send(SubtitleEvent {
         info: SubtitleEventType::SubtitleDelete(DeleteEventData {
             subtitle: subtitle_id,
+        }),
+        project: project.id,
+    });
+
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct SubtitleEditInfo {
+    start: Option<i32>,
+    end: Option<i32>,
+    text: Option<String>,
+}
+
+#[patch("/project/<project_id>/subtitle/<subtitle_id>", data = "<info>")]
+async fn edit_subtitle(
+    project_id: i32,
+    subtitle_id: i32,
+    info: Json<SubtitleEditInfo>,
+    user: User,
+    db: DbConn,
+    queue: &State<Sender<SubtitleEvent>>,
+) -> Result<(), Status> {
+    let project: Project = db
+        .run(move |conn| {
+            project::table
+                .inner_join(workspace::table.left_join(workspace_member::table))
+                .filter(workspace_member::user.eq(user.id))
+                .filter(project::id.eq(project_id))
+                .select(project::all_columns)
+                .first::<Project>(conn)
+        })
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    let mut subtitle: Subtitle = db
+        .run(move |conn| {
+            subtitle::table
+                .filter(subtitle::id.eq(subtitle_id))
+                .filter(subtitle::project.eq(project.id))
+                .first::<Subtitle>(conn)
+        })
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    if let Some(start) = info.start {
+        subtitle.start = start;
+    }
+    if let Some(end) = info.end {
+        subtitle.end = end;
+    }
+    if let Some(text) = info.text.clone() {
+        subtitle.text = text;
+    }
+
+    let updated_count: usize = db
+        .run(move |conn| {
+            diesel::update(subtitle::table)
+                .filter(subtitle::id.eq(subtitle_id))
+                .filter(subtitle::project.eq(project.id))
+                .set((
+                    (subtitle::start.eq(subtitle.start)),
+                    (subtitle::end.eq(subtitle.end)),
+                    (subtitle::text.eq(subtitle.text)),
+                ))
+                .execute(conn)
+        })
+        .await
+        .map_err(|_| Status::InternalServerError)?;
+
+    if updated_count == 0 {
+        // This probably shouldn't happen because we're already fetching the subtitle earlier
+        return Err(Status::NotFound);
+    }
+
+    // Broadcast SSE
+    let _ = queue.send(SubtitleEvent {
+        info: SubtitleEventType::SubtitleEdit(EditEventData {
+            subtitle: subtitle_id,
+            start: info.start,
+            end: info.end,
+            text: info.text.clone(),
         }),
         project: project.id,
     });
@@ -568,6 +655,11 @@ fn rocket() -> _ {
         .mount("/api", routes![get_project, events]) // Projects
         .mount(
             "/api",
-            routes![get_subtitle_list, create_subtitle, delete_subtitle],
+            routes![
+                get_subtitle_list,
+                create_subtitle,
+                edit_subtitle,
+                delete_subtitle
+            ],
         ) // Subtitles
 }
