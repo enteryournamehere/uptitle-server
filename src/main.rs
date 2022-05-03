@@ -159,7 +159,7 @@ async fn get_project(id: i32, user: User, db: DbConn) -> Result<Json<ProjectInfo
     Ok(Json(ProjectInfo {
         id: project.id,
         workspace: project.workspace,
-        name: project.name.clone(),
+        name: project.name,
         source: video.source.clone(),
         video: Some(VideoInfo {
             id: video.identifier.clone(),
