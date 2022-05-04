@@ -170,6 +170,82 @@ async fn get_project(id: i32, user: User, db: DbConn) -> Result<Json<ProjectInfo
     }))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct ProjectCreationInfo {
+    name: String,
+    workspace: i32,
+    video: String,
+}
+
+#[post("/project/create", data = "<project>")]
+async fn create_project(
+    project: Json<ProjectCreationInfo>,
+    user: User,
+    db: DbConn,
+) -> Result<String, Status> {
+    let workspace_id = project.workspace;
+    let user_is_in_workspace = db
+        .run(move |conn| {
+            workspace_member::table
+                .filter(workspace_member::user.eq(user.id))
+                .filter(workspace_member::workspace.eq(workspace_id))
+                .first::<WorkspaceMember>(conn)
+        })
+        .await
+        .is_ok();
+
+    if !user_is_in_workspace {
+        return Err(Status::NotFound);
+    }
+
+    let project = project.into_inner();
+
+    let new_video = NewVideo {
+        identifier: project.video.clone(),
+        source: "youtube".to_string(),
+        duration: None,
+        waveform: None,
+    };
+    let video_id = db
+        .run(move |conn| {
+            let result = diesel::insert_into(video::table)
+                .values(new_video)
+                .execute(conn);
+
+            if let Err(message) = result {
+                return Err(message);
+            }
+
+            diesel::select(last_insert_rowid).get_result::<i32>(conn)
+        })
+        .await
+        .map_err(|_| Status::InternalServerError)?;
+
+    let project = NewProject {
+        name: project.name,
+        workspace: project.workspace,
+        video: Some(video_id),
+    };
+
+    let project_id = db
+        .run(move |conn| {
+            let result = diesel::insert_into(project::table)
+                .values(project)
+                .execute(conn);
+
+            if let Err(message) = result {
+                return Err(message);
+            }
+
+            diesel::select(last_insert_rowid).get_result::<i32>(conn)
+        })
+        .await
+        .map_err(|_| Status::InternalServerError)?;
+
+    Ok(project_id.to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(crate = "rocket::serde")]
 struct CreateEventData {
@@ -652,7 +728,7 @@ fn rocket() -> _ {
         .mount("/api", routes![secure]) // Temp
         .mount("/api", routes![login, auth, logout, register]) // Auth
         .mount("/api", routes![list_workspaces]) // Workspaces
-        .mount("/api", routes![get_project, events]) // Projects
+        .mount("/api", routes![get_project, create_project, events]) // Projects
         .mount(
             "/api",
             routes![

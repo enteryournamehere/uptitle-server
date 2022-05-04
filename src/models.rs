@@ -51,6 +51,16 @@ pub struct Video {
     pub waveform: Option<Vec<u8>>,
 }
 
+#[derive(Debug, Insertable, Serialize)]
+#[serde(crate = "rocket::serde")]
+#[table_name = "video"]
+pub struct NewVideo {
+    pub source: String,
+    pub identifier: String,
+    pub duration: Option<i32>,
+    pub waveform: Option<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, Queryable, Serialize, Identifiable, Associations)]
 #[serde(crate = "rocket::serde")]
 #[belongs_to(Workspace, foreign_key = "workspace")]
@@ -58,6 +68,15 @@ pub struct Video {
 #[primary_key(id)]
 pub struct Project {
     pub id: i32,
+    pub workspace: i32,
+    pub name: String,
+    pub video: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Insertable)]
+#[serde(crate = "rocket::serde")]
+#[table_name = "project"]
+pub struct NewProject {
     pub workspace: i32,
     pub name: String,
     pub video: Option<i32>,
