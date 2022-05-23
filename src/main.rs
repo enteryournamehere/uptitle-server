@@ -12,15 +12,24 @@ use argon2::{
     Argon2,
 };
 
-use rocket::http::{Cookie, CookieJar};
-use rocket::request::{self, FromRequest, Outcome, Request};
 use rocket::response::stream::{Event, EventStream};
 use rocket::response::Debug;
 use rocket::serde::{json::Json, Deserialize, Serialize};
 use rocket::tokio::select;
 use rocket::tokio::sync::broadcast::{channel, error::RecvError, Sender};
 use rocket::{http::Status, Shutdown, State};
+use rocket::{
+    http::{Cookie, CookieJar},
+    tokio::task,
+};
+use rocket::{
+    request::{self, FromRequest, Outcome, Request},
+    tokio::time::Instant,
+};
 use rocket_sync_db_pools::diesel;
+
+use std::env;
+use std::process::Command;
 
 use self::diesel::sqlite::SqliteConnection;
 
@@ -183,6 +192,7 @@ async fn create_project(
     project: Json<ProjectCreationInfo>,
     user: User,
     db: DbConn,
+    queue: &State<Sender<SubtitleEvent>>,
 ) -> Result<String, Status> {
     let workspace_id = project.workspace;
     let user_is_in_workspace = db
@@ -200,6 +210,13 @@ async fn create_project(
     }
 
     let project = project.into_inner();
+
+    match youtube_video_exists(&project.video).await {
+        Ok(false) | Err(_) => {
+            return Err(Status::NotFound);
+        }
+        _ => {}
+    }
 
     let new_video = NewVideo {
         identifier: project.video.clone(),
@@ -222,8 +239,8 @@ async fn create_project(
         .await
         .map_err(|_| Status::InternalServerError)?;
 
-    let project = NewProject {
-        name: project.name,
+    let new_project = NewProject {
+        name: project.name.clone(),
         workspace: project.workspace,
         video: Some(video_id),
     };
@@ -231,7 +248,7 @@ async fn create_project(
     let project_id = db
         .run(move |conn| {
             let result = diesel::insert_into(project::table)
-                .values(project)
+                .values(new_project)
                 .execute(conn);
 
             if let Err(message) = result {
@@ -243,7 +260,147 @@ async fn create_project(
         .await
         .map_err(|_| Status::InternalServerError)?;
 
+    let sender = queue.inner().to_owned();
+    let youtube_id = project.video.clone();
+    task::spawn(async move {
+        if let Ok(()) = download_youtube_audio(db, youtube_id.as_str()).await {
+            let _ = sender.send(SubtitleEvent {
+                info: SubtitleEventType::WaveformReady,
+                project: project_id,
+            });
+        }
+    });
+
     Ok(project_id.to_string())
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(crate = "rocket::serde")]
+struct YoutubeResponseTest {
+    page_info: PageInfo,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(crate = "rocket::serde")]
+struct PageInfo {
+    total_results: u32,
+    #[allow(dead_code)]
+    results_per_page: u32,
+}
+
+async fn youtube_video_exists(youtube_id: &str) -> core::result::Result<bool, reqwest::Error> {
+    let url = format!(
+        "https://www.googleapis.com/youtube/v3/videos?part=id&id={}&key={}",
+        youtube_id,
+        env::var("YOUTUBE_API_KEY").unwrap()
+    );
+
+    let response = reqwest::get(&url)
+        .await?
+        .json::<YoutubeResponseTest>()
+        .await?;
+
+    Ok(response.page_info.total_results > 0)
+}
+
+// Status as the error type is pretty much useless, I'll probably change it later
+async fn download_youtube_audio(db: DbConn, youtube_id: &str) -> Result<(), Status> {
+    let start = Instant::now();
+
+    let client = ytextract::Client::new();
+
+    // Find available streams
+    let stream = client
+        .streams(
+            youtube_id
+                .parse()
+                .map_err(|_| Status::InternalServerError)?,
+        )
+        .await
+        .map_err(|_| Status::InternalServerError)?
+        // Filter to audio-only
+        .filter(|stream| stream.mime_type().starts_with("audio/"))
+        // Get the one with the lowest .bitrate()
+        .min_by(|a, b| a.bitrate().cmp(&b.bitrate()))
+        .ok_or(Status::InternalServerError)?;
+
+    let duration_ms = stream
+        .duration()
+        .expect("Stream has no duration")
+        .as_millis() as i32;
+
+    let audio_filename = format!("/tmp/uptitle-{}.ogg", youtube_id);
+    let waveform_filename = format!("/tmp/uptitle-{}.dat", youtube_id);
+
+    // Download and convert audio in background
+    let stream_url = stream.url().to_string();
+    let audio_filename2 = audio_filename.to_owned();
+    let waveform_filename2 = waveform_filename.to_owned();
+    let waveform = task::spawn_blocking(move || {
+        Command::new("ffmpeg")
+            .args(["-i", &stream_url, &audio_filename2])
+            .output()
+            .expect("ffmpeg failed");
+
+        Command::new("audiowaveform")
+            .args([
+                "-i",
+                &audio_filename2,
+                "-o",
+                &waveform_filename2,
+                "-b",
+                "8",
+                "--pixels-per-second",
+                "400",
+            ])
+            .output()
+            .expect("audiowaveform failed");
+
+        std::fs::read(&waveform_filename2)
+    })
+    .await
+    .map_err(|_| Status::InternalServerError)?
+    .map_err(|_| Status::InternalServerError)?;
+
+    // Update database
+    let youtube_id = youtube_id.to_owned();
+    db.run(move |conn| {
+        diesel::update(video::table)
+            .filter(video::identifier.eq(youtube_id))
+            .set((
+                video::waveform.eq(Some(waveform)),
+                video::duration.eq(Some(duration_ms)),
+            ))
+            .execute(conn)
+    })
+    .await
+    .map_err(|_| Status::InternalServerError)?;
+
+    // Clean up
+    std::fs::remove_file(&audio_filename).expect("could not delete file");
+    std::fs::remove_file(&waveform_filename).expect("could not delete file");
+
+    println!("done in {:?}", start.elapsed());
+
+    Ok(())
+}
+
+#[get("/waveform/<youtube_id>")]
+async fn get_waveform(youtube_id: String, db: DbConn) -> Result<Vec<u8>, Status> {
+    let waveform = db
+        .run(move |conn| {
+            video::table
+                .filter(video::identifier.eq(youtube_id))
+                .select(video::waveform)
+                .first::<Option<Vec<u8>>>(conn)
+        })
+        .await
+        .map_err(|_| Status::InternalServerError)?;
+
+    match waveform {
+        Some(waveform) => Ok(waveform),
+        None => Err(Status::NotFound),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -403,7 +560,7 @@ async fn create_subtitle(
             end: subtitle.end,
             text: subtitle.text,
         }),
-        project: 1,
+        project: project.id,
     });
 
     Ok(new_id.to_string())
@@ -509,9 +666,9 @@ async fn edit_subtitle(
                 .filter(subtitle::id.eq(subtitle_id))
                 .filter(subtitle::project.eq(project.id))
                 .set((
-                    (subtitle::start.eq(subtitle.start)),
-                    (subtitle::end.eq(subtitle.end)),
-                    (subtitle::text.eq(subtitle.text)),
+                    subtitle::start.eq(subtitle.start),
+                    subtitle::end.eq(subtitle.end),
+                    subtitle::text.eq(subtitle.text),
                 ))
                 .execute(conn)
         })
@@ -722,13 +879,18 @@ fn logout(cookies: &CookieJar<'_>) -> String {
 
 #[launch]
 fn rocket() -> _ {
+    dotenv::dotenv().ok();
+
     rocket::build()
         .attach(DbConn::fairing())
         .manage(channel::<SubtitleEvent>(1024).0)
         .mount("/api", routes![secure]) // Temp
         .mount("/api", routes![login, auth, logout, register]) // Auth
         .mount("/api", routes![list_workspaces]) // Workspaces
-        .mount("/api", routes![get_project, create_project, events]) // Projects
+        .mount(
+            "/api",
+            routes![get_project, create_project, events, get_waveform],
+        ) // Projects
         .mount(
             "/api",
             routes![

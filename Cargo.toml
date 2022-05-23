@@ -8,6 +8,9 @@ rocket = { version = "0.5.0-rc.1", features = ["json", "secrets"] }
 diesel = { version = "1.4.4", features = ["sqlite", "r2d2"] }
 argon2 = "0.4.0"
 rand_core = { version = "0.6.3", features = ["std"] }
+ytextract = "0.11.0"
+dotenv = "0.15.0"
+reqwest = "0.11.10"
 
 [dependencies.rocket_sync_db_pools]
 features = ["diesel_sqlite_pool", "sqlite_pool"]
