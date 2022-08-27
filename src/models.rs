@@ -1,4 +1,5 @@
 use crate::schema::*;
+use rocket::serde::Deserialize;
 use rocket::serde::Serialize;
 
 #[derive(Debug, Clone, Serialize, Queryable, Identifiable, Associations)]
@@ -82,7 +83,7 @@ pub struct NewProject {
     pub video: Option<i32>,
 }
 
-#[derive(Debug, Clone, Queryable, Serialize, Identifiable, Associations)]
+#[derive(Debug, Clone, Queryable, Serialize, Deserialize, Identifiable, Associations)]
 #[serde(crate = "rocket::serde")]
 #[belongs_to(Project, foreign_key = "project")]
 #[table_name = "subtitle"]
@@ -102,4 +103,16 @@ pub struct NewSubtitle {
     pub start: i32,
     pub end: i32,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Queryable, Serialize, Identifiable, Associations, Insertable)]
+#[serde(crate = "rocket::serde")]
+#[belongs_to(Project, foreign_key = "project")]
+#[table_name = "snapshot"]
+#[primary_key(project, timestamp)]
+pub struct Snapshot {
+    pub project: i32,
+    pub timestamp: i64,
+    pub name: Option<String>,
+    pub subtitles: String,
 }

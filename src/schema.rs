@@ -10,6 +10,15 @@ diesel::table! {
 }
 
 diesel::table! {
+    snapshot (project, timestamp) {
+        project -> Integer,
+        timestamp -> BigInt,
+        name -> Nullable<Text>,
+        subtitles -> Text,
+    }
+}
+
+diesel::table! {
     subtitle (id) {
         id -> Integer,
         project -> Integer,
@@ -58,6 +67,7 @@ diesel::table! {
 
 diesel::joinable!(project -> video (video));
 diesel::joinable!(project -> workspace (workspace));
+diesel::joinable!(snapshot -> project (project));
 diesel::joinable!(subtitle -> project (project));
 diesel::joinable!(workspace -> user (owner));
 diesel::joinable!(workspace_member -> user (user));
@@ -65,6 +75,7 @@ diesel::joinable!(workspace_member -> workspace (workspace));
 
 diesel::allow_tables_to_appear_in_same_query!(
     project,
+    snapshot,
     subtitle,
     user,
     video,

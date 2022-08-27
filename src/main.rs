@@ -27,6 +27,7 @@ use rocket::{
     tokio::time::Instant,
 };
 use rocket_sync_db_pools::diesel;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::env;
 use std::process::Command;
@@ -694,6 +695,142 @@ async fn edit_subtitle(
     Ok(())
 }
 
+#[post("/project/<project_id>/snapshot/create")]
+async fn create_snapshot(project_id: i32, user: User, db: DbConn) -> Result<String, Status> {
+    let project: Project = db
+        .run(move |conn| {
+            project::table
+                .inner_join(workspace::table.left_join(workspace_member::table))
+                .filter(workspace_member::user.eq(user.id))
+                .filter(project::id.eq(project_id))
+                .select(project::all_columns)
+                .first::<Project>(conn)
+        })
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    // Get all subtitles for this project
+    let subtitles: Vec<Subtitle> = db
+        .run(move |conn| {
+            subtitle::table
+                .filter(subtitle::project.eq(project.id))
+                .order(subtitle::start)
+                .load::<Subtitle>(conn)
+        })
+        .await
+        .map_err(|_| Status::InternalServerError)?;
+
+    // Put them into a big json array
+    let subtitles_json = rocket::serde::json::serde_json::to_string(&subtitles)
+        .map_err(|_| Status::InternalServerError)?;
+
+    let _affected_rows: usize = db
+        .run(move |conn| {
+            diesel::insert_into(schema::snapshot::table)
+                .values(&Snapshot {
+                    project: project.id,
+                    name: None,
+                    timestamp: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("we're in the past")
+                        .as_secs() as i64,
+                    subtitles: subtitles_json,
+                })
+                .execute(conn)
+        })
+        .await
+        .map_err(|_| Status::InternalServerError)?;
+    Ok("done".to_string())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(crate = "rocket::serde")]
+struct SnapshotInfo {
+    project: i32,
+    timestamp: i64,
+    name: Option<String>,
+}
+
+#[get("/project/<project_id>/snapshot/list", rank = 1)]
+async fn list_snapshots(
+    project_id: i32,
+    user: User,
+    db: DbConn,
+) -> Result<Json<Vec<SnapshotInfo>>, Status> {
+    let project: Project = db
+        .run(move |conn| {
+            project::table
+                .inner_join(workspace::table.left_join(workspace_member::table))
+                .filter(workspace_member::user.eq(user.id))
+                .filter(project::id.eq(project_id))
+                .select(project::all_columns)
+                .first::<Project>(conn)
+        })
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    let snapshots: Vec<SnapshotInfo> = db
+        .run(move |conn| {
+            schema::snapshot::table
+                .filter(schema::snapshot::project.eq(project.id))
+                .order(schema::snapshot::timestamp.desc())
+                .select((
+                    schema::snapshot::project,
+                    schema::snapshot::timestamp,
+                    schema::snapshot::name,
+                ))
+                .load::<(i32, i64, Option<String>)>(conn)
+        })
+        .await
+        .map_err(|_| Status::InternalServerError)?
+        .into_iter()
+        .map(|(project, timestamp, name)| SnapshotInfo {
+            project,
+            timestamp,
+            name,
+        })
+        .collect();
+
+    Ok(Json(snapshots))
+}
+
+#[get("/project/<project_id>/snapshot/<timestamp>", rank = 2)]
+async fn get_snapshot(
+    project_id: i32,
+    timestamp: i64,
+    user: User,
+    db: DbConn,
+) -> Result<Json<Vec<Subtitle>>, Status> {
+    let project: Project = db
+        .run(move |conn| {
+            project::table
+                .inner_join(workspace::table.left_join(workspace_member::table))
+                .filter(workspace_member::user.eq(user.id))
+                .filter(project::id.eq(project_id))
+                .select(project::all_columns)
+                .first::<Project>(conn)
+        })
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    let snapshot: Snapshot = db
+        .run(move |conn| {
+            schema::snapshot::table
+                .filter(schema::snapshot::project.eq(project.id))
+                .filter(schema::snapshot::timestamp.eq(timestamp))
+                .first::<Snapshot>(conn)
+        })
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    // This is kinda unnecessary because it first deserializes the json and then re-serializes it.
+    // But this way the return type of this function is the clearest.
+    let subtitles: Vec<Subtitle> = rocket::serde::json::serde_json::from_str(&snapshot.subtitles)
+        .map_err(|_| Status::InternalServerError)?;
+
+    Ok(Json(subtitles))
+}
+
 // Authentication
 
 // Ensure user is logged in and get their info from the DB
@@ -900,4 +1037,8 @@ fn rocket() -> _ {
                 delete_subtitle
             ],
         ) // Subtitles
+        .mount(
+            "/api",
+            routes![list_snapshots, create_snapshot, get_snapshot],
+        ) // Snapshots
 }
