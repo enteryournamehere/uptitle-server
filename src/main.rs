@@ -231,9 +231,7 @@ async fn create_project(
                 .values(new_video)
                 .execute(conn);
 
-            if let Err(message) = result {
-                return Err(message);
-            }
+            result?;
 
             diesel::select(last_insert_rowid).get_result::<i32>(conn)
         })
@@ -252,9 +250,7 @@ async fn create_project(
                 .values(new_project)
                 .execute(conn);
 
-            if let Err(message) = result {
-                return Err(message);
-            }
+            result?;
 
             diesel::select(last_insert_rowid).get_result::<i32>(conn)
         })
@@ -544,9 +540,7 @@ async fn create_subtitle(
                 .values(&subtitle_clone)
                 .execute(conn);
 
-            if let Err(message) = result {
-                return Err(message);
-            }
+            result?;
 
             diesel::select(last_insert_rowid).get_result::<i32>(conn)
         })
@@ -965,9 +959,8 @@ async fn register(
             let result = diesel::insert_into(user::table)
                 .values(&new_user)
                 .execute(conn);
-            if let Err(message) = result {
-                return Err(message);
-            }
+
+            result?;
 
             diesel::select(last_insert_rowid).get_result::<i32>(conn)
         })
