@@ -317,8 +317,12 @@ async fn download_youtube_audio(db: DbConn, youtube_id: &str) -> Result<(), Stat
         )
         .await
         .map_err(|_| Status::InternalServerError)?
-        // Filter to audio-only
-        .filter(|stream| stream.mime_type().starts_with("audio/"))
+        // Filter to audio-only and find one with sample rate 48000...
+        // 44100 results in waveform alignment issues (makes for 400.9 px per second)
+        .filter(|stream| match stream {
+            ytextract::Stream::Audio(audio) => audio.sample_rate() == 48000,
+            _ => false,
+        })
         // Get the one with the lowest .bitrate()
         .min_by(|a, b| a.bitrate().cmp(&b.bitrate()))
         .ok_or(Status::InternalServerError)?;
