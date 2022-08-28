@@ -788,13 +788,20 @@ async fn list_snapshots(
     Ok(Json(snapshots))
 }
 
+#[derive(Serialize)]
+#[serde(crate = "rocket::serde")]
+struct SnapshotResponse {
+    name: Option<String>,
+    subtitles: Vec<Subtitle>,
+}
+
 #[get("/project/<project_id>/snapshot/<timestamp>", rank = 2)]
 async fn get_snapshot(
     project_id: i32,
     timestamp: i64,
     user: User,
     db: DbConn,
-) -> Result<Json<Vec<Subtitle>>, Status> {
+) -> Result<Json<SnapshotResponse>, Status> {
     let project: Project = db
         .run(move |conn| {
             project::table
@@ -822,7 +829,51 @@ async fn get_snapshot(
     let subtitles: Vec<Subtitle> = rocket::serde::json::serde_json::from_str(&snapshot.subtitles)
         .map_err(|_| Status::InternalServerError)?;
 
-    Ok(Json(subtitles))
+    let response: SnapshotResponse = SnapshotResponse {
+        name: snapshot.name,
+        subtitles,
+    };
+
+    Ok(Json(response))
+}
+
+#[derive(Deserialize)]
+#[serde(crate = "rocket::serde")]
+struct SnapshotPatchInfo {
+    name: String,
+}
+
+#[patch("/project/<project_id>/snapshot/<timestamp>", data = "<info>")]
+async fn edit_snapshot(
+    project_id: i32,
+    timestamp: i64,
+    info: Json<SnapshotPatchInfo>,
+    user: User,
+    db: DbConn,
+) -> Result<(), Status> {
+    let project: Project = db
+        .run(move |conn| {
+            project::table
+                .inner_join(workspace::table.left_join(workspace_member::table))
+                .filter(workspace_member::user.eq(user.id))
+                .filter(project::id.eq(project_id))
+                .select(project::all_columns)
+                .first::<Project>(conn)
+        })
+        .await
+        .map_err(|_| Status::NotFound)?;
+
+    let _affected_rows: usize = db
+        .run(move |conn| {
+            diesel::update(schema::snapshot::table)
+                .filter(schema::snapshot::project.eq(project.id))
+                .filter(schema::snapshot::timestamp.eq(timestamp))
+                .set(schema::snapshot::name.eq(info.name.clone()))
+                .execute(conn)
+        })
+        .await
+        .map_err(|_| Status::InternalServerError)?;
+    Ok(())
 }
 
 // Authentication
@@ -1032,6 +1083,6 @@ fn rocket() -> _ {
         ) // Subtitles
         .mount(
             "/api",
-            routes![list_snapshots, create_snapshot, get_snapshot],
+            routes![list_snapshots, create_snapshot, get_snapshot, edit_snapshot],
         ) // Snapshots
 }
