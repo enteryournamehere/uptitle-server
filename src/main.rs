@@ -30,7 +30,7 @@ use rocket_sync_db_pools::diesel;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::env;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use self::diesel::sqlite::SqliteConnection;
 
@@ -332,23 +332,17 @@ async fn download_youtube_audio(db: DbConn, youtube_id: &str) -> Result<(), Stat
         .expect("Stream has no duration")
         .as_millis() as i32;
 
-    let audio_filename = format!("/tmp/uptitle-{}.ogg", youtube_id);
     let waveform_filename = format!("/tmp/uptitle-{}.dat", youtube_id);
 
     // Download and convert audio in background
     let stream_url = stream.url().to_string();
-    let audio_filename2 = audio_filename.to_owned();
     let waveform_filename2 = waveform_filename.to_owned();
-    let waveform = task::spawn_blocking(move || {
-        Command::new("ffmpeg")
-            .args(["-i", &stream_url, &audio_filename2])
-            .output()
-            .expect("ffmpeg failed");
 
-        Command::new("audiowaveform")
+    let waveform = task::spawn_blocking(move || {
+        let waveformer = Command::new("audiowaveform")
             .args([
-                "-i",
-                &audio_filename2,
+                "--input-format",
+                "wav",
                 "-o",
                 &waveform_filename2,
                 "-b",
@@ -356,8 +350,15 @@ async fn download_youtube_audio(db: DbConn, youtube_id: &str) -> Result<(), Stat
                 "--pixels-per-second",
                 "400",
             ])
-            .output()
+            .stdin(Stdio::piped())
+            .spawn()
             .expect("audiowaveform failed");
+
+        Command::new("ffmpeg")
+            .args(["-i", &stream_url, "-f", "wav", "-"])
+            .stdout(waveformer.stdin.unwrap())
+            .output()
+            .expect("ffmpeg failed");
 
         std::fs::read(&waveform_filename2)
     })
@@ -380,7 +381,6 @@ async fn download_youtube_audio(db: DbConn, youtube_id: &str) -> Result<(), Stat
     .map_err(|_| Status::InternalServerError)?;
 
     // Clean up
-    std::fs::remove_file(&audio_filename).expect("could not delete file");
     std::fs::remove_file(&waveform_filename).expect("could not delete file");
 
     println!("done in {:?}", start.elapsed());
