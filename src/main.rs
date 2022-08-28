@@ -207,7 +207,7 @@ async fn create_project(
         .is_ok();
 
     if !user_is_in_workspace {
-        return Err(Status::NotFound);
+        return Err(Status::Forbidden);
     }
 
     let project = project.into_inner();
@@ -273,12 +273,14 @@ async fn create_project(
 
 #[derive(Deserialize, Debug)]
 #[serde(crate = "rocket::serde")]
+#[serde(rename_all = "camelCase")]
 struct YoutubeResponseTest {
     page_info: PageInfo,
 }
 
 #[derive(Deserialize, Debug)]
 #[serde(crate = "rocket::serde")]
+#[serde(rename_all = "camelCase")]
 struct PageInfo {
     total_results: u32,
     #[allow(dead_code)]
