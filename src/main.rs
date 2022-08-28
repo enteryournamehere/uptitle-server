@@ -338,8 +338,9 @@ async fn download_youtube_audio(db: DbConn, youtube_id: &str) -> Result<(), Stat
     let stream_url = stream.url().to_string();
     let waveform_filename2 = waveform_filename.to_owned();
 
+    // doesn't work for some longer (>30 min) videos, unclear why
     let waveform = task::spawn_blocking(move || {
-        let waveformer = Command::new("audiowaveform")
+        let mut waveformer = Command::new("audiowaveform")
             .args([
                 "--input-format",
                 "wav",
@@ -356,9 +357,11 @@ async fn download_youtube_audio(db: DbConn, youtube_id: &str) -> Result<(), Stat
 
         Command::new("ffmpeg")
             .args(["-i", &stream_url, "-f", "wav", "-"])
-            .stdout(waveformer.stdin.unwrap())
+            .stdout(waveformer.stdin.take().unwrap())
             .output()
             .expect("ffmpeg failed");
+
+        waveformer.wait().expect("audiowaveform failed");
 
         std::fs::read(&waveform_filename2)
     })
